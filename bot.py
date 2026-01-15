@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import time
+from datetime import date
 from dotenv import load_dotenv
 
 from telegram import Update
@@ -26,12 +27,19 @@ if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# --- основные параметры
 MAX_HISTORY = 30
 SUMMARY_TRIGGER = 10
+FREE_DAILY_LIMIT = 20
+
+# --- пути (Railway Volume)
 DB_PATH = "/app/data/dialogs.db"
 
+# --- интервалы
 SHORT_GAP = 3 * 24 * 60 * 60
 LONG_GAP = 14 * 24 * 60 * 60
+
+# ================== PROMPTS ==================
 
 SYSTEM_PROMPT = (
     "Ты — поддерживающий психологический ассистент.\n"
@@ -51,6 +59,7 @@ SUMMARY_PROMPT = (
 )
 
 # ================== SQLITE ==================
+
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -73,8 +82,18 @@ CREATE TABLE IF NOT EXISTS summaries (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS usage (
+    user_id INTEGER,
+    date TEXT,
+    count INTEGER,
+    PRIMARY KEY (user_id, date)
+)
+""")
+
 conn.commit()
 
+# ================== DB HELPERS ==================
 
 def save_message(user_id: int, role: str, content: str):
     cursor.execute(
@@ -98,14 +117,6 @@ def load_last_messages(user_id: int, limit: int):
     return [{"role": r, "content": c} for r, c in reversed(rows)]
 
 
-def count_user_messages(user_id: int) -> int:
-    cursor.execute(
-        "SELECT COUNT(*) FROM messages WHERE user_id = ? AND role = 'user'",
-        (user_id,)
-    )
-    return cursor.fetchone()[0]
-
-
 def has_history(user_id: int) -> bool:
     cursor.execute(
         "SELECT 1 FROM messages WHERE user_id = ? LIMIT 1",
@@ -121,11 +132,18 @@ def get_last_user_ts(user_id: int):
         WHERE user_id = ? AND role = 'user'
         ORDER BY ts DESC
         LIMIT 1
-        """,
-        (user_id,)
-    )
+        """
+    , (user_id,))
     row = cursor.fetchone()
     return row[0] if row else None
+
+
+def count_user_messages(user_id: int) -> int:
+    cursor.execute(
+        "SELECT COUNT(*) FROM messages WHERE user_id = ? AND role = 'user'",
+        (user_id,)
+    )
+    return cursor.fetchone()[0]
 
 
 def get_summary(user_id: int):
@@ -152,11 +170,7 @@ def save_summary(user_id: int, content: str):
 
 def generate_summary(user_id: int):
     history = load_last_messages(user_id, MAX_HISTORY)
-
-    messages = [
-        {"role": "system", "content": SUMMARY_PROMPT},
-        *history
-    ]
+    messages = [{"role": "system", "content": SUMMARY_PROMPT}, *history]
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -166,6 +180,43 @@ def generate_summary(user_id: int):
 
     save_summary(user_id, response.choices[0].message.content.strip())
 
+# ================== FREEMIUM ==================
+
+CRISIS_KEYWORDS = [
+    "суицид", "умереть", "не хочу жить", "покончить",
+    "паника", "очень плохо", "страшно", "тревожно", "бессмысленно"
+]
+
+
+def is_crisis(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in CRISIS_KEYWORDS)
+
+
+def today():
+    return date.today().isoformat()
+
+
+def get_usage(user_id: int) -> int:
+    cursor.execute(
+        "SELECT count FROM usage WHERE user_id = ? AND date = ?",
+        (user_id, today())
+    )
+    row = cursor.fetchone()
+    return row[0] if row else 0
+
+
+def increment_usage(user_id: int):
+    cursor.execute(
+        """
+        INSERT INTO usage (user_id, date, count)
+        VALUES (?, ?, 1)
+        ON CONFLICT(user_id, date)
+        DO UPDATE SET count = count + 1
+        """,
+        (user_id, today())
+    )
+    conn.commit()
 
 # ================== HANDLERS ==================
 
@@ -209,33 +260,34 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     summary = get_summary(user_id)
-
     if not summary:
-        try:
-            generate_summary(user_id)
-            summary = get_summary(user_id)
-        except Exception:
-            await update.message.reply_text(
-                "Мне сейчас трудно сформулировать обобщение. "
-                "Можно попробовать чуть позже."
-            )
-            return
+        generate_summary(user_id)
+        summary = get_summary(user_id)
 
-    text = (
+    await update.message.reply_text(
         "Вот как я сейчас вижу общую картину нашего разговора.\n\n"
         f"{summary}\n\n"
         "Если что-то откликается — можно продолжить с этого места.\n"
         "Если нет — вы можете поправить или написать о том, что сейчас важнее."
     )
 
-    await update.message.reply_text(text)
-
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text.strip()
 
+    usage = get_usage(user_id)
+    if usage >= FREE_DAILY_LIMIT and not is_crisis(user_text):
+        await update.message.reply_text(
+            "Я здесь и готов продолжать разговор.\n\n"
+            "На сегодня вы использовали бесплатный лимит сообщений.\n"
+            "Если хотите общаться без ограничений — можно оформить доступ.\n\n"
+            "Если же сейчас тяжело или тревожно — напишите об этом, я отвечу."
+        )
+        return
+
     save_message(user_id, "user", user_text)
+    increment_usage(user_id)
 
     if count_user_messages(user_id) % SUMMARY_TRIGGER == 0:
         try:
@@ -247,7 +299,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary = get_summary(user_id)
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
     if summary:
         messages.append({
             "role": "system",
@@ -256,22 +307,15 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     messages.extend(history)
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.6
-        )
-        answer = response.choices[0].message.content
-    except Exception:
-        await update.message.reply_text(
-            "Мне сейчас трудно ответить. Попробуйте написать чуть позже."
-        )
-        return
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        temperature=0.6
+    )
 
+    answer = response.choices[0].message.content
     save_message(user_id, "assistant", answer)
     await update.message.reply_text(answer)
-
 
 # ================== ЗАПУСК ==================
 
@@ -281,8 +325,9 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("summary", summary_command))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-print("🧠 Психологический ИИ-бот с /summary запущен")
+print("🧠 Психологический ИИ-бот с freemium-лимитом запущен")
 app.run_polling()
+
 
 
 
