@@ -27,15 +27,13 @@ if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- основные параметры
 MAX_HISTORY = 30
 SUMMARY_TRIGGER = 10
 FREE_DAILY_LIMIT = 20
+SUBSCRIPTION_DAYS = 30
 
-# --- пути (Railway Volume)
 DB_PATH = "/app/data/dialogs.db"
 
-# --- интервалы
 SHORT_GAP = 3 * 24 * 60 * 60
 LONG_GAP = 14 * 24 * 60 * 60
 
@@ -91,6 +89,13 @@ CREATE TABLE IF NOT EXISTS usage (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS subscriptions (
+    user_id INTEGER PRIMARY KEY,
+    expires_at INTEGER
+)
+""")
+
 conn.commit()
 
 # ================== DB HELPERS ==================
@@ -132,8 +137,9 @@ def get_last_user_ts(user_id: int):
         WHERE user_id = ? AND role = 'user'
         ORDER BY ts DESC
         LIMIT 1
-        """
-    , (user_id,))
+        """,
+        (user_id,)
+    )
     row = cursor.fetchone()
     return row[0] if row else None
 
@@ -179,6 +185,30 @@ def generate_summary(user_id: int):
     )
 
     save_summary(user_id, response.choices[0].message.content.strip())
+
+# ================== SUBSCRIPTIONS ==================
+
+def activate_subscription(user_id: int):
+    expires_at = int(time.time()) + SUBSCRIPTION_DAYS * 86400
+    cursor.execute(
+        """
+        INSERT INTO subscriptions (user_id, expires_at)
+        VALUES (?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET expires_at=excluded.expires_at
+        """,
+        (user_id, expires_at)
+    )
+    conn.commit()
+
+
+def has_active_subscription(user_id: int) -> bool:
+    cursor.execute(
+        "SELECT expires_at FROM subscriptions WHERE user_id = ?",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    return row is not None and row[0] > time.time()
 
 # ================== FREEMIUM ==================
 
@@ -250,6 +280,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Подписка на психологический ИИ-ассистент\n\n"
+        "Стоимость: 999 ₽ за 30 дней\n\n"
+        "Подписка даёт доступ к общению без дневных ограничений "
+        "и позволяет сохранять длительную историю диалога.\n\n"
+        "Подписка является необязательной.\n"
+        "Базовый функционал доступен бесплатно.\n\n"
+        "Это не медицинская и не психотерапевтическая услуга."
+    )
+
+async def pricing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Подписка на психологический ИИ-ассистент\n\n"
+        "Стоимость: 999 ₽ за 30 дней\n\n"
+        "Подписка даёт доступ к общению без дневных ограничений "
+        "и позволяет сохранять длительную историю диалога.\n\n"
+        "Подписка является необязательной.\n"
+        "Базовый функционал доступен бесплатно.\n\n"
+        "Это не медицинская и не психотерапевтическая услуга."
+    )
+
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -276,18 +328,20 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text.strip()
 
-    usage = get_usage(user_id)
-    if usage >= FREE_DAILY_LIMIT and not is_crisis(user_text):
-        await update.message.reply_text(
-            "Я здесь и готов продолжать разговор.\n\n"
-            "На сегодня вы использовали бесплатный лимит сообщений.\n"
-            "Если хотите общаться без ограничений — можно оформить доступ.\n\n"
-            "Если же сейчас тяжело или тревожно — напишите об этом, я отвечу."
-        )
-        return
+    if not has_active_subscription(user_id):
+        usage = get_usage(user_id)
+        if usage >= FREE_DAILY_LIMIT and not is_crisis(user_text):
+            await update.message.reply_text(
+                "Я здесь и готов продолжать разговор.\n\n"
+                "На сегодня вы использовали бесплатный лимит сообщений.\n"
+                "Если хотите общаться без ограничений — можно оформить подписку.\n\n"
+                "Если же сейчас тяжело или тревожно — напишите об этом, я отвечу."
+            )
+            return
 
     save_message(user_id, "user", user_text)
-    increment_usage(user_id)
+    if not has_active_subscription(user_id):
+        increment_usage(user_id)
 
     if count_user_messages(user_id) % SUMMARY_TRIGGER == 0:
         try:
@@ -323,10 +377,14 @@ app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("summary", summary_command))
+app.add_handler(CommandHandler("subscribe", subscribe_command))
+app.add_handler(CommandHandler("pricing", pricing_command))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-print("🧠 Психологический ИИ-бот с freemium-лимитом запущен")
+print("🧠 Психологический ИИ-бот с подпиской на 30 дней запущен")
 app.run_polling()
+
+
 
 
 
