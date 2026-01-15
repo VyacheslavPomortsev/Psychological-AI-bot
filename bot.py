@@ -4,11 +4,16 @@ import time
 from datetime import date
 from dotenv import load_dotenv
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -54,6 +59,16 @@ SUMMARY_PROMPT = (
     "Опиши, что происходит с человеком, какие чувства и темы проявляются.\n"
     "Без диагнозов, интерпретаций и советов.\n"
     "Нейтрально, спокойно, в 3–5 предложениях."
+)
+
+PRICING_TEXT = (
+    "Подписка на психологический ИИ-ассистент\n\n"
+    "Стоимость: 999 ₽ за 30 дней\n\n"
+    "Подписка даёт доступ к общению без дневных ограничений "
+    "и позволяет сохранять длительную историю диалога.\n\n"
+    "Подписка является необязательной.\n"
+    "Базовый функционал доступен бесплатно.\n\n"
+    "Это не медицинская и не психотерапевтическая услуга."
 )
 
 # ================== SQLITE ==================
@@ -248,6 +263,14 @@ def increment_usage(user_id: int):
     )
     conn.commit()
 
+# ================== UI ==================
+
+def subscribe_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🟢 Оформить подписку", callback_data="subscribe_start")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 # ================== HANDLERS ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,27 +303,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def pricing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
+
+
 async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Подписка на психологический ИИ-ассистент\n\n"
-        "Стоимость: 999 ₽ за 30 дней\n\n"
-        "Подписка даёт доступ к общению без дневных ограничений "
-        "и позволяет сохранять длительную историю диалога.\n\n"
-        "Подписка является необязательной.\n"
-        "Базовый функционал доступен бесплатно.\n\n"
-        "Это не медицинская и не психотерапевтическая услуга."
+    await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
+
+
+async def subscribe_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.message.reply_text(
+        "Спасибо за интерес к подписке.\n\n"
+        "Оплата будет доступна в ближайшее время.\n"
+        "Я сообщу, когда можно будет оформить подписку."
     )
 
-async def pricing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Подписка на психологический ИИ-ассистент\n\n"
-        "Стоимость: 999 ₽ за 30 дней\n\n"
-        "Подписка даёт доступ к общению без дневных ограничений "
-        "и позволяет сохранять длительную историю диалога.\n\n"
-        "Подписка является необязательной.\n"
-        "Базовый функционал доступен бесплатно.\n\n"
-        "Это не медицинская и не психотерапевтическая услуга."
-    )
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -376,13 +396,15 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("summary", summary_command))
-app.add_handler(CommandHandler("subscribe", subscribe_command))
 app.add_handler(CommandHandler("pricing", pricing_command))
+app.add_handler(CommandHandler("subscribe", subscribe_command))
+app.add_handler(CommandHandler("summary", summary_command))
+app.add_handler(CallbackQueryHandler(subscribe_button_callback, pattern="^subscribe_start$"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-print("🧠 Психологический ИИ-бот с подпиской на 30 дней запущен")
+print("🧠 Психологический ИИ-бот с pricing и кнопкой оформления запущен")
 app.run_polling()
+
 
 
 
