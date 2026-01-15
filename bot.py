@@ -20,7 +20,7 @@ from telegram.ext import (
 
 from openai import OpenAI
 
-# ================== НАСТРОЙКИ ==================
+# ================== ENV ==================
 
 load_dotenv()
 
@@ -28,17 +28,18 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not ADMIN_ID:
-    raise RuntimeError("❌ Не заданы TELEGRAM_TOKEN / OPENAI_API_KEY / ADMIN_ID")
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
+    raise RuntimeError("❌ Не заданы TELEGRAM_TOKEN или OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-MAX_HISTORY = 30
-SUMMARY_TRIGGER = 10
-FREE_DAILY_LIMIT = 20
-SUBSCRIPTION_DAYS = 30
+# ================== CONFIG ==================
 
 DB_PATH = "/app/data/dialogs.db"
+MAX_HISTORY = 30
+FREE_DAILY_LIMIT = 20
+SUMMARY_TRIGGER = 10
+SUBSCRIPTION_DAYS = 30
 
 SHORT_GAP = 3 * 24 * 60 * 60
 LONG_GAP = 14 * 24 * 60 * 60
@@ -56,10 +57,9 @@ SYSTEM_PROMPT = (
 )
 
 SUMMARY_PROMPT = (
-    "Сделай краткое, бережное резюме диалога с точки зрения психолога.\n"
-    "Опиши, что происходит с человеком, какие чувства и темы проявляются.\n"
-    "Без диагнозов, интерпретаций и советов.\n"
-    "Нейтрально, спокойно, в 3–5 предложениях."
+    "Сделай краткое, бережное резюме диалога.\n"
+    "Опиши чувства и темы без диагнозов и советов.\n"
+    "3–5 предложений."
 )
 
 PRICING_TEXT = (
@@ -72,10 +72,9 @@ PRICING_TEXT = (
     "Это не медицинская и не психотерапевтическая услуга."
 )
 
-# ================== SQLITE ==================
+# ================== DB ==================
 
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -114,74 +113,51 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 
 conn.commit()
 
-# ================== DB HELPERS ==================
+# ================== HELPERS ==================
 
-def save_message(user_id: int, role: str, content: str):
+def save_message(user_id, role, content):
     cursor.execute(
         "INSERT INTO messages VALUES (?, ?, ?, ?)",
         (user_id, role, content, int(time.time()))
     )
     conn.commit()
 
-
-def load_last_messages(user_id: int, limit: int):
+def load_history(user_id, limit):
     cursor.execute(
-        """
-        SELECT role, content FROM messages
-        WHERE user_id = ?
-        ORDER BY ts DESC
-        LIMIT ?
-        """,
+        "SELECT role, content FROM messages WHERE user_id=? ORDER BY ts DESC LIMIT ?",
         (user_id, limit)
     )
     rows = cursor.fetchall()
     return [{"role": r, "content": c} for r, c in reversed(rows)]
 
-
-def has_history(user_id: int) -> bool:
-    cursor.execute(
-        "SELECT 1 FROM messages WHERE user_id = ? LIMIT 1",
-        (user_id,)
-    )
+def has_history(user_id):
+    cursor.execute("SELECT 1 FROM messages WHERE user_id=? LIMIT 1", (user_id,))
     return cursor.fetchone() is not None
 
-
-def get_last_user_ts(user_id: int):
+def last_user_ts(user_id):
     cursor.execute(
-        """
-        SELECT ts FROM messages
-        WHERE user_id = ? AND role = 'user'
-        ORDER BY ts DESC
-        LIMIT 1
-        """,
+        "SELECT ts FROM messages WHERE user_id=? AND role='user' ORDER BY ts DESC LIMIT 1",
         (user_id,)
     )
     row = cursor.fetchone()
     return row[0] if row else None
 
-
-def count_user_messages(user_id: int) -> int:
+def count_user_messages(user_id):
     cursor.execute(
-        "SELECT COUNT(*) FROM messages WHERE user_id = ? AND role = 'user'",
+        "SELECT COUNT(*) FROM messages WHERE user_id=? AND role='user'",
         (user_id,)
     )
     return cursor.fetchone()[0]
 
-
-def get_summary(user_id: int):
-    cursor.execute(
-        "SELECT content FROM summaries WHERE user_id = ?",
-        (user_id,)
-    )
+def get_summary(user_id):
+    cursor.execute("SELECT content FROM summaries WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
     return row[0] if row else None
 
-
-def save_summary(user_id: int, content: str):
+def save_summary(user_id, content):
     cursor.execute(
         """
-        INSERT INTO summaries (user_id, content, ts)
-        VALUES (?, ?, ?)
+        INSERT INTO summaries VALUES (?, ?, ?)
         ON CONFLICT(user_id)
         DO UPDATE SET content=excluded.content, ts=excluded.ts
         """,
@@ -189,90 +165,31 @@ def save_summary(user_id: int, content: str):
     )
     conn.commit()
 
-
-def generate_summary(user_id: int):
-    history = load_last_messages(user_id, MAX_HISTORY)
-    messages = [{"role": "system", "content": SUMMARY_PROMPT}, *history]
-
-    response = client.chat.completions.create(
+def generate_summary(user_id):
+    history = load_history(user_id, MAX_HISTORY)
+    messages = [{"role": "system", "content": SUMMARY_PROMPT}] + history
+    r = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
         temperature=0.4
     )
-
-    save_summary(user_id, response.choices[0].message.content.strip())
-
-# ================== STATS ==================
-
-def stats_total_users():
-    cursor.execute(
-        "SELECT COUNT(DISTINCT user_id) FROM messages WHERE role='user'"
-    )
-    return cursor.fetchone()[0]
-
-
-def stats_today_users():
-    cursor.execute(
-        """
-        SELECT COUNT(DISTINCT user_id)
-        FROM messages
-        WHERE role='user'
-        AND ts >= strftime('%s','now','start of day')
-        """
-    )
-    return cursor.fetchone()[0]
-
-
-def stats_week_users():
-    cursor.execute(
-        """
-        SELECT COUNT(DISTINCT user_id)
-        FROM messages
-        WHERE role='user'
-        AND ts >= strftime('%s','now','-7 days')
-        """
-    )
-    return cursor.fetchone()[0]
-
-
-def stats_active_subscriptions():
-    cursor.execute(
-        "SELECT COUNT(*) FROM subscriptions WHERE expires_at > ?",
-        (int(time.time()),)
-    )
-    return cursor.fetchone()[0]
-
-# ================== FREEMIUM ==================
-
-CRISIS_KEYWORDS = [
-    "суицид", "умереть", "не хочу жить", "покончить",
-    "паника", "очень плохо", "страшно", "тревожно", "бессмысленно"
-]
-
-
-def is_crisis(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in CRISIS_KEYWORDS)
-
+    save_summary(user_id, r.choices[0].message.content.strip())
 
 def today():
     return date.today().isoformat()
 
-
-def get_usage(user_id: int) -> int:
+def get_usage(user_id):
     cursor.execute(
-        "SELECT count FROM usage WHERE user_id = ? AND date = ?",
+        "SELECT count FROM usage WHERE user_id=? AND date=?",
         (user_id, today())
     )
     row = cursor.fetchone()
     return row[0] if row else 0
 
-
-def increment_usage(user_id: int):
+def inc_usage(user_id):
     cursor.execute(
         """
-        INSERT INTO usage (user_id, date, count)
-        VALUES (?, ?, 1)
+        INSERT INTO usage VALUES (?, ?, 1)
         ON CONFLICT(user_id, date)
         DO UPDATE SET count = count + 1
         """,
@@ -290,66 +207,121 @@ def subscribe_keyboard():
 # ================== HANDLERS ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
 
-    if not has_history(user_id):
+    if not has_history(uid):
         text = (
             "Здравствуйте.\n\n"
-            "Здесь не нужно подбирать правильные слова или что-то объяснять «как надо».\n"
-            "Я постараюсь быть рядом и помочь вам разобраться в том, что сейчас происходит.\n\n"
-            "Пишите столько и так, как вам комфортно."
+            "Здесь можно писать так, как вам сейчас получается.\n"
+            "Я постараюсь быть рядом и помочь разобраться.\n\n"
+            "С чего бы вы хотели начать?"
         )
     else:
-        last_ts = get_last_user_ts(user_id)
-        gap = time.time() - last_ts if last_ts else 0
-
+        gap = time.time() - (last_user_ts(uid) or time.time())
         if gap > LONG_GAP:
             text = (
-                "Прошло некоторое время с нашего последнего разговора.\n\n"
-                "Если вам важно — мы можем спокойно продолжить или начать с того, "
-                "что сейчас для вас актуально."
+                "Прошло некоторое время.\n\n"
+                "Если хотите — можем начать заново или продолжить."
             )
         else:
             text = (
-                "Рада снова быть с вами на связи.\n\n"
-                "Вы можете продолжить с того места, где остановились, "
-                "или написать о том, что сейчас для вас важно."
+                "Рада снова быть на связи.\n\n"
+                "Можете продолжить с того места, где остановились."
             )
 
     await update.message.reply_text(text)
+
+async def pricing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
+
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
+
+async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "Оплата будет доступна в ближайшее время.\n"
+        "Я сообщу, когда можно будет оформить подписку."
+    )
+
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not has_history(uid):
+        await update.message.reply_text("Пока нет диалога для резюме.")
+        return
+
+    if not get_summary(uid):
+        generate_summary(uid)
+
+    await update.message.reply_text(get_summary(uid))
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    text = (
-        "📊 Статистика бота\n\n"
-        f"👥 Всего пользователей: {stats_total_users()}\n"
-        f"📆 Активных сегодня: {stats_today_users()}\n"
-        f"📈 Активных за 7 дней: {stats_week_users()}\n"
-        f"💳 Активных подписок: {stats_active_subscriptions()}"
+    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM messages WHERE role='user'")
+    total = cursor.fetchone()[0]
+
+    cursor.execute(
+        "SELECT COUNT(DISTINCT user_id) FROM messages "
+        "WHERE role='user' AND ts >= strftime('%s','now','start of day')"
+    )
+    today_users = cursor.fetchone()[0]
+
+    await update.message.reply_text(
+        f"📊 Статистика\n\n"
+        f"👥 Всего пользователей: {total}\n"
+        f"📆 Активных сегодня: {today_users}"
     )
 
-    await update.message.reply_text(text)
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text.strip()
 
-# ====== остальные handlers (start, pricing, subscribe, summary, chat) —
-# ⚠️ ОСТАЮТСЯ БЕЗ ИЗМЕНЕНИЙ ⚠️
-# Они уже есть в твоей версии и работают корректно
+    if get_usage(uid) >= FREE_DAILY_LIMIT:
+        await update.message.reply_text(
+            "На сегодня бесплатный лимит исчерпан.\n"
+            "Можно оформить подписку или продолжить завтра."
+        )
+        return
 
-# ================== ЗАПУСК ==================
+    save_message(uid, "user", text)
+    inc_usage(uid)
+
+    if count_user_messages(uid) % SUMMARY_TRIGGER == 0:
+        try:
+            generate_summary(uid)
+        except Exception:
+            pass
+
+    history = load_history(uid, MAX_HISTORY)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+
+    r = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        temperature=0.6
+    )
+
+    answer = r.choices[0].message.content
+    save_message(uid, "assistant", answer)
+    await update.message.reply_text(answer)
+
+# ================== RUN ==================
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-app.add_handler(CommandHandler("stats", stats_command))
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("pricing", pricing_command))
 app.add_handler(CommandHandler("subscribe", subscribe_command))
 app.add_handler(CommandHandler("summary", summary_command))
-app.add_handler(CallbackQueryHandler(subscribe_button_callback, pattern="^subscribe_start$"))
+app.add_handler(CommandHandler("stats", stats_command))
+app.add_handler(CallbackQueryHandler(subscribe_callback, pattern="^subscribe_start$"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-print("🧠 Психологический ИИ-бот со статистикой админа запущен")
+print("🧠 Бот успешно запущен")
 app.run_polling()
+
 
 
 
