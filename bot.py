@@ -289,6 +289,35 @@ def subscribe_keyboard():
 
 # ================== HANDLERS ==================
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not has_history(user_id):
+        text = (
+            "Здравствуйте.\n\n"
+            "Здесь не нужно подбирать правильные слова или что-то объяснять «как надо».\n"
+            "Я постараюсь быть рядом и помочь вам разобраться в том, что сейчас происходит.\n\n"
+            "Пишите столько и так, как вам комфортно."
+        )
+    else:
+        last_ts = get_last_user_ts(user_id)
+        gap = time.time() - last_ts if last_ts else 0
+
+        if gap > LONG_GAP:
+            text = (
+                "Прошло некоторое время с нашего последнего разговора.\n\n"
+                "Если вам важно — мы можем спокойно продолжить или начать с того, "
+                "что сейчас для вас актуально."
+            )
+        else:
+            text = (
+                "Рада снова быть с вами на связи.\n\n"
+                "Вы можете продолжить с того места, где остановились, "
+                "или написать о том, что сейчас для вас важно."
+            )
+
+    await update.message.reply_text(text)
+
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
