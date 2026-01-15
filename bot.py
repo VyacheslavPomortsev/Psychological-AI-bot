@@ -28,7 +28,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 MAX_HISTORY = 30
 SUMMARY_TRIGGER = 10
-DB_PATH = "dialogs.db"
+DB_PATH = "/app/data/dialogs.db"
 
 SHORT_GAP = 3 * 24 * 60 * 60
 LONG_GAP = 14 * 24 * 60 * 60
