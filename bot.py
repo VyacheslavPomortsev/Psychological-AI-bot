@@ -26,9 +26,10 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise RuntimeError("❌ Не заданы TELEGRAM_TOKEN или OPENAI_API_KEY")
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not ADMIN_ID:
+    raise RuntimeError("❌ Не заданы TELEGRAM_TOKEN / OPENAI_API_KEY / ADMIN_ID")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -201,29 +202,45 @@ def generate_summary(user_id: int):
 
     save_summary(user_id, response.choices[0].message.content.strip())
 
-# ================== SUBSCRIPTIONS ==================
+# ================== STATS ==================
 
-def activate_subscription(user_id: int):
-    expires_at = int(time.time()) + SUBSCRIPTION_DAYS * 86400
+def stats_total_users():
+    cursor.execute(
+        "SELECT COUNT(DISTINCT user_id) FROM messages WHERE role='user'"
+    )
+    return cursor.fetchone()[0]
+
+
+def stats_today_users():
     cursor.execute(
         """
-        INSERT INTO subscriptions (user_id, expires_at)
-        VALUES (?, ?)
-        ON CONFLICT(user_id)
-        DO UPDATE SET expires_at=excluded.expires_at
-        """,
-        (user_id, expires_at)
+        SELECT COUNT(DISTINCT user_id)
+        FROM messages
+        WHERE role='user'
+        AND ts >= strftime('%s','now','start of day')
+        """
     )
-    conn.commit()
+    return cursor.fetchone()[0]
 
 
-def has_active_subscription(user_id: int) -> bool:
+def stats_week_users():
     cursor.execute(
-        "SELECT expires_at FROM subscriptions WHERE user_id = ?",
-        (user_id,)
+        """
+        SELECT COUNT(DISTINCT user_id)
+        FROM messages
+        WHERE role='user'
+        AND ts >= strftime('%s','now','-7 days')
+        """
     )
-    row = cursor.fetchone()
-    return row is not None and row[0] > time.time()
+    return cursor.fetchone()[0]
+
+
+def stats_active_subscriptions():
+    cursor.execute(
+        "SELECT COUNT(*) FROM subscriptions WHERE expires_at > ?",
+        (int(time.time()),)
+    )
+    return cursor.fetchone()[0]
 
 # ================== FREEMIUM ==================
 
@@ -266,135 +283,35 @@ def increment_usage(user_id: int):
 # ================== UI ==================
 
 def subscribe_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("🟢 Оформить подписку", callback_data="subscribe_start")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🟢 Оформить подписку", callback_data="subscribe_start")]]
+    )
 
 # ================== HANDLERS ==================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
 
-    if not has_history(user_id):
-        text = (
-            "Здравствуйте.\n\n"
-            "Здесь не нужно подбирать правильные слова или что-то объяснять «как надо».\n"
-            "Я постараюсь быть рядом и помочь вам разобраться в том, что сейчас происходит.\n\n"
-            "Пишите столько и так, как вам комфортно."
-        )
-    else:
-        last_ts = get_last_user_ts(user_id)
-        gap = time.time() - last_ts if last_ts else 0
-
-        if gap > LONG_GAP:
-            text = (
-                "Прошло некоторое время с нашего последнего разговора.\n\n"
-                "Если вам важно — мы можем спокойно продолжить или начать с того, "
-                "что сейчас для вас актуально."
-            )
-        else:
-            text = (
-                "Рада снова быть с вами на связи.\n\n"
-                "Вы можете продолжить с того места, где остановились, "
-                "или написать о том, что сейчас для вас важно."
-            )
+    text = (
+        "📊 Статистика бота\n\n"
+        f"👥 Всего пользователей: {stats_total_users()}\n"
+        f"📆 Активных сегодня: {stats_today_users()}\n"
+        f"📈 Активных за 7 дней: {stats_week_users()}\n"
+        f"💳 Активных подписок: {stats_active_subscriptions()}"
+    )
 
     await update.message.reply_text(text)
 
-
-async def pricing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
-
-
-async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
-
-
-async def subscribe_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    await query.message.reply_text(
-        "Спасибо за интерес к подписке.\n\n"
-        "Оплата будет доступна в ближайшее время.\n"
-        "Я сообщу, когда можно будет оформить подписку."
-    )
-
-
-async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not has_history(user_id):
-        await update.message.reply_text(
-            "Пока у нас ещё не было разговора, который можно было бы обобщить."
-        )
-        return
-
-    summary = get_summary(user_id)
-    if not summary:
-        generate_summary(user_id)
-        summary = get_summary(user_id)
-
-    await update.message.reply_text(
-        "Вот как я сейчас вижу общую картину нашего разговора.\n\n"
-        f"{summary}\n\n"
-        "Если что-то откликается — можно продолжить с этого места.\n"
-        "Если нет — вы можете поправить или написать о том, что сейчас важнее."
-    )
-
-
-async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_text = update.message.text.strip()
-
-    if not has_active_subscription(user_id):
-        usage = get_usage(user_id)
-        if usage >= FREE_DAILY_LIMIT and not is_crisis(user_text):
-            await update.message.reply_text(
-                "Я здесь и готов продолжать разговор.\n\n"
-                "На сегодня вы использовали бесплатный лимит сообщений.\n"
-                "Если хотите общаться без ограничений — можно оформить подписку.\n\n"
-                "Если же сейчас тяжело или тревожно — напишите об этом, я отвечу."
-            )
-            return
-
-    save_message(user_id, "user", user_text)
-    if not has_active_subscription(user_id):
-        increment_usage(user_id)
-
-    if count_user_messages(user_id) % SUMMARY_TRIGGER == 0:
-        try:
-            generate_summary(user_id)
-        except Exception:
-            pass
-
-    history = load_last_messages(user_id, MAX_HISTORY)
-    summary = get_summary(user_id)
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if summary:
-        messages.append({
-            "role": "system",
-            "content": f"Краткое резюме предыдущих разговоров:\n{summary}"
-        })
-
-    messages.extend(history)
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.6
-    )
-
-    answer = response.choices[0].message.content
-    save_message(user_id, "assistant", answer)
-    await update.message.reply_text(answer)
+# ====== остальные handlers (start, pricing, subscribe, summary, chat) —
+# ⚠️ ОСТАЮТСЯ БЕЗ ИЗМЕНЕНИЙ ⚠️
+# Они уже есть в твоей версии и работают корректно
 
 # ================== ЗАПУСК ==================
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+app.add_handler(CommandHandler("stats", stats_command))
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("pricing", pricing_command))
 app.add_handler(CommandHandler("subscribe", subscribe_command))
@@ -402,7 +319,7 @@ app.add_handler(CommandHandler("summary", summary_command))
 app.add_handler(CallbackQueryHandler(subscribe_button_callback, pattern="^subscribe_start$"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-print("🧠 Психологический ИИ-бот с pricing и кнопкой оформления запущен")
+print("🧠 Психологический ИИ-бот со статистикой админа запущен")
 app.run_polling()
 
 
