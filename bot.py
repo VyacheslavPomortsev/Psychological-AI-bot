@@ -3,19 +3,19 @@ import sqlite3
 import time
 from datetime import date
 from dotenv import load_dotenv
-from telegram import LabeledPrice
-from telegram.ext import PreCheckoutQueryHandler
 
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
 )
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
     CommandHandler,
     CallbackQueryHandler,
+    PreCheckoutQueryHandler,
     ContextTypes,
     filters,
 )
@@ -28,10 +28,14 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
     raise RuntimeError("❌ Не заданы TELEGRAM_TOKEN или OPENAI_API_KEY")
+
+if not PAYMENT_PROVIDER_TOKEN:
+    raise RuntimeError("❌ Не задан PAYMENT_PROVIDER_TOKEN")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -42,6 +46,9 @@ MAX_HISTORY = 30
 FREE_DAILY_LIMIT = 20
 SUMMARY_TRIGGER = 10
 SUBSCRIPTION_DAYS = 30
+
+SUBSCRIPTION_PRICE = 99900  # 999 ₽ в копейках
+CURRENCY = "RUB"
 
 SHORT_GAP = 3 * 24 * 60 * 60
 LONG_GAP = 14 * 24 * 60 * 60
@@ -64,12 +71,9 @@ SUMMARY_PROMPT = (
     "3–5 предложений."
 )
 
-SUBSCRIPTION_PRICE = 99900   # 999 ₽ в копейках
-CURRENCY = "RUB"
-
 PRICING_TEXT = (
     "Подписка на психологический ИИ-ассистент\n\n"
-    "Стоимость: $9.99 ₽ за 30 дней\n\n"
+    "Стоимость: 999 ₽ за 30 дней\n\n"
     "Подписка даёт доступ к общению без дневных ограничений "
     "и позволяет сохранять длительную историю диалога.\n\n"
     "Подписка является необязательной.\n"
@@ -202,13 +206,6 @@ def inc_usage(user_id):
     )
     conn.commit()
 
-# ================== UI ==================
-
-def subscribe_keyboard():
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🟢 Оформить подписку", callback_data="subscribe_start")]]
-    )
-
 def activate_subscription(user_id: int):
     expires_at = int(time.time()) + SUBSCRIPTION_DAYS * 86400
     cursor.execute(
@@ -221,6 +218,13 @@ def activate_subscription(user_id: int):
         (user_id, expires_at)
     )
     conn.commit()
+
+# ================== UI ==================
+
+def subscribe_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🟢 Оформить подписку", callback_data="subscribe_start")]]
+    )
 
 # ================== HANDLERS ==================
 
@@ -248,10 +252,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     await update.message.reply_text(text)
-    
 
 async def pricing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
+
+async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "Чтобы оформить подписку, пожалуйста, напишите команду:\n\n"
+        "/subscribe"
+    )
 
 async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = [LabeledPrice("Подписка на 30 дней", SUBSCRIPTION_PRICE)]
@@ -261,19 +271,13 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title="Подписка на психологический ИИ-ассистент",
         description="Доступ без дневных ограничений на 30 дней.",
         payload="subscription_30_days",
-        provider_token=os.getenv("PAYMENT_PROVIDER_TOKEN"),
+        provider_token=PAYMENT_PROVIDER_TOKEN,
         currency=CURRENCY,
         prices=prices,
     )
 
-async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-
-    await update.callback_query.message.reply_text(
-        "Чтобы оформить подписку, пожалуйста, напишите команду:\n\n"
-        "/subscribe"
-    )
-
+async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.pre_checkout_query.answer(ok=True)
 
 async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -284,11 +288,6 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
         "Подписка активирована на 30 дней.\n"
         "Вы можете продолжать общение без ограничений."
     )
-
-
-async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.pre_checkout_query.answer(ok=True)
-
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -363,9 +362,9 @@ app.add_handler(CommandHandler("subscribe", subscribe_command))
 app.add_handler(CommandHandler("summary", summary_command))
 app.add_handler(CommandHandler("stats", stats_command))
 app.add_handler(CallbackQueryHandler(subscribe_callback, pattern="^subscribe_start$"))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
 print("🧠 Бот успешно запущен")
 app.run_polling()
