@@ -262,7 +262,8 @@ async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     prices = [LabeledPrice("Подписка на 30 дней", SUBSCRIPTION_PRICE)]
 
-    await query.message.reply_invoice(
+    await context.bot.send_invoice(
+        chat_id=query.message.chat_id,
         title="Подписка на психологический ИИ-ассистент",
         description="Доступ без дневных ограничений на 30 дней.",
         payload="subscription_30_days",
