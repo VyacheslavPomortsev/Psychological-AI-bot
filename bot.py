@@ -64,8 +64,8 @@ SUMMARY_PROMPT = (
     "3–5 предложений."
 )
 
-SUBSCRIPTION_PRICE = 999  # $9.99 → в центах
-CURRENCY = "USD"
+SUBSCRIPTION_PRICE = 99900   # 999 ₽ в копейках
+CURRENCY = "RUB"
 
 PRICING_TEXT = (
     "Подписка на психологический ИИ-ассистент\n\n"
