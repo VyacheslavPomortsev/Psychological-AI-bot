@@ -254,16 +254,10 @@ async def pricing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
 
 async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(PRICING_TEXT, reply_markup=subscribe_keyboard())
-
-async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
     prices = [LabeledPrice("Подписка на 30 дней", SUBSCRIPTION_PRICE)]
 
     await context.bot.send_invoice(
-        chat_id=query.message.chat_id,
+        chat_id=update.effective_chat.id,
         title="Подписка на психологический ИИ-ассистент",
         description="Доступ без дневных ограничений на 30 дней.",
         payload="subscription_30_days",
@@ -271,6 +265,15 @@ async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         currency=CURRENCY,
         prices=prices,
     )
+
+async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+    await update.callback_query.message.reply_text(
+        "Чтобы оформить подписку, пожалуйста, напишите команду:\n\n"
+        "/subscribe"
+    )
+
 
 async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
